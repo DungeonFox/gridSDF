@@ -23,6 +23,61 @@ function _quadrantIndex(bx, by){
   return row*cols + col;
 }
 
+function _layerQuadrantKey(z, qi){
+  return [z|0, qi|0];
+}
+
+async function _loadLayerQuadrant(z, qi){
+  if (!this._db) return null;
+  const key=_layerQuadrantKey(z, qi);
+  let buf=await idbGet(this._db, STORE_LAYER, key);
+  if (buf) return buf;
+
+  const legacyKey=`${z|0},${qi|0}`;
+  buf=await idbGet(this._db, STORE_LAYER, legacyKey);
+  if (buf){
+    try {
+      await idbPut(this._db, STORE_LAYER, key, buf.slice(0));
+    } catch(err){
+      console.warn(`[SDFGrid] Failed to migrate quadrant ${qi} for layer ${z}`, err);
+    }
+  }
+  return buf || null;
+}
+
+async function _storeLayerQuadrant(z, qi, buffer){
+  if (!this._db) return false;
+  const key=_layerQuadrantKey(z, qi);
+  await idbPut(this._db, STORE_LAYER, key, buffer);
+  return true;
+}
+
+async function _persistQuadrant(z, qi, arr, F, attempts=3){
+  if (!this._db) return true;
+  for (let attempt=0; attempt<attempts; attempt++){
+    const quad=_sliceQuadrant.call(this, arr, qi, F);
+    const start=quad.byteOffset;
+    const end=start + quad.byteLength;
+    const buf=quad.buffer.slice(start, end);
+    try {
+      await _storeLayerQuadrant.call(this, z, qi, buf);
+      const stored=await _loadLayerQuadrant.call(this, z, qi);
+      if (stored && stored.byteLength === quad.byteLength) return true;
+    } catch(err){
+      console.warn(`[SDFGrid] Failed to persist quadrant ${qi} for layer ${z} (attempt ${attempt+1})`, err);
+    }
+  }
+  console.warn(`[SDFGrid] Unable to persist quadrant ${qi} for layer ${z} after ${attempts} attempts`);
+  return false;
+}
+
+async function _persistQuadrantRange(z, arr, F, indices){
+  if (!this._db) return;
+  for (const qi of indices){
+    await _persistQuadrant.call(this, z, qi, arr, F);
+  }
+}
+
 function _sliceQuadrant(arr, qi, F){
   const { cols, qW, qH } = _ensureLayout(this);
   const col=qi%cols, row=Math.floor(qi/cols);
@@ -130,16 +185,15 @@ export async function _ensureDenseLayer(z){
   }
 
   const lmeta=await idbGet(this._db, STORE_LMETA, key);
-  const buffers=await Promise.all(Array.from({length:qCount},(_,i)=>idbGet(this._db, STORE_LAYER, `${key},${i}`)));
+  const buffers=await Promise.all(Array.from({length:qCount},(_,i)=>_loadLayerQuadrant.call(this, key, i)));
+  const hasAny=buffers.some(Boolean);
+  const allIndices=Array.from({length:qCount},(_,i)=>i);
 
-  if (buffers.every(b=>!b)){
+  if (!hasAny){
     const tmpl=await this._ensureZeroTemplate();
     const arr=denseFromQuadrants(tmpl, targetSchema);
     await this._applySparseIntoDense(z, arr);
-    await Promise.all(Array.from({length:qCount},(_,i)=>{
-      const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-      return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-    }));
+    await _persistQuadrantRange.call(this, key, arr, Fnew, allIndices);
     await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
     this._layerCache.set(key,arr); return arr;
   }
@@ -148,9 +202,18 @@ export async function _ensureDenseLayer(z){
   const curList=lmeta?.fields || [];
   if (curSid === targetSchema.id && arraysEqual(curList, targetSchema.fieldNames)){
     const arr=new Float32Array(DENSE_W*DENSE_H*Fnew);
+    const missing=[];
     for(let i=0;i<qCount;i++){
-      const buf=buffers[i]; if(!buf) continue;
-      _insertQuadrant.call(this, arr, i, new Float32Array(buf), Fnew);
+      const buf=buffers[i];
+      if(buf){
+        _insertQuadrant.call(this, arr, i, new Float32Array(buf), Fnew);
+      } else {
+        missing.push(i);
+      }
+    }
+    if (missing.length){
+      await _persistQuadrantRange.call(this, key, arr, Fnew, missing);
+      await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
     }
     this._layerCache.set(key,arr); return arr;
   }
@@ -183,10 +246,7 @@ export async function _ensureDenseLayer(z){
     }
   }
 
-  await Promise.all(Array.from({length:qCount},(_,i)=>{
-    const quad=_sliceQuadrant.call(this, arr, i, Fnew);
-    return idbPut(this._db, STORE_LAYER, `${key},${i}`, quad.buffer);
-  }));
+  await _persistQuadrantRange.call(this, key, arr, Fnew, allIndices);
   await idbPut(this._db, STORE_LMETA, key, { sid:targetSchema.id, fields:targetSchema.fieldNames });
   this._layerCache.set(key,arr); return arr;
 }
@@ -270,15 +330,13 @@ export async function _flushDirtyLayers(){
   this._dirtyLayers.clear();
   _ensureLayout(this);
   await Promise.all(entries.map(async ([z,set])=>{
-    const arr=this._layerCache.get(z|0);
+    const layerKey=z|0;
+    const arr=this._layerCache.get(layerKey);
     if (!arr) return;
     const F=this.schema.fieldNames.length;
-    const writes=Array.from(set).map(qi=>{
-      const quad=_sliceQuadrant.call(this, arr, qi, F);
-      return idbPut(this._db, STORE_LAYER, `${z},${qi}`, quad.buffer);
-    });
-    writes.push(idbPut(this._db, STORE_LMETA, z|0, { sid:this.schema.id, fields:this.schema.fieldNames }));
-    await Promise.all(writes);
+    const indices=Array.from(set).sort((a,b)=>a-b);
+    await _persistQuadrantRange.call(this, layerKey, arr, F, indices);
+    await idbPut(this._db, STORE_LMETA, layerKey, { sid:this.schema.id, fields:this.schema.fieldNames });
   }));
   this._flushHandle=null;
 }
