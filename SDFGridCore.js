@@ -34,7 +34,7 @@ import { DEFAULT_QUADRANT_COUNT } from './SDFGridConstants.js';
 import {
   _ensureZeroTemplate, _ensureBaseSDF, getBaseDistance, _denseIdx, _ensureDenseLayer,
   _mapCellToDense, _applySparseIntoDense, setDenseFromCell, addDenseFromCell,
-  sampleDenseForCell, _flushDirtyLayers
+  sampleDenseForCell, _flushDirtyLayers, withLayerQuadrant
 } from './SDFGridLayers.js';
 import { updateParticles } from './SDFGridParticles.js';
 import { visualizeGrid, _valueToColor, updateVisualization } from './SDFGridVisualization.js';
@@ -171,6 +171,7 @@ Object.assign(SDFGrid.prototype, {
   addDenseFromCell,
   sampleDenseForCell,
   _flushDirtyLayers,
+  withLayerQuadrant,
   updateParticles,
   visualizeGrid,
   _valueToColor,
