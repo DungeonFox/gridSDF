@@ -73,6 +73,13 @@ export async function updateGrid(params){
   this.state.shapeType  = params.shapeType  || this.state.shapeType;
   this.state.customSVGPath = params.customSVGPath || this.state.customSVGPath;
 
+  if (this._vec2ManagerPromise){
+    this._vec2ManagerPromise.then(mgr => {
+      mgr?.setBaseContext?.({ file: this.state.shapeType || 'grid' });
+      return mgr;
+    }).catch(()=>{});
+  }
+
   if (Array.isArray(params.fieldNames) && params.fieldNames.length){
     await this.evolveSchema(params.fieldNames);
     this.fieldForViz = this.fieldForViz && this.schema.index.has(this.fieldForViz) ? this.fieldForViz : this.schema.fieldNames[0];
@@ -86,6 +93,7 @@ export async function updateGrid(params){
   this._layerCache.clear();
   this._dirtyLayers.clear();
   if (this._flushHandle){ clearTimeout(this._flushHandle); this._flushHandle=null; }
+  this._vec2LastEntries = new Map();
 
   this.initializeGrid();
 
@@ -197,6 +205,17 @@ export function dispose(){
     this.scene.remove(this.gridGroup);
     this.gridGroup.traverse(o=>{ if(o.geometry)o.geometry.dispose(); if(o.material)o.material.dispose(); });
     this.gridGroup=null; this.instancedMesh=null;
+  }
+  if (this._vec2ManagerPromise){
+    this._vec2ManagerPromise.then(mgr => {
+      try { mgr?.stopReliability?.(); } catch (e) { /* noop */ }
+      return mgr;
+    }).catch(()=>{});
+    this._vec2ManagerPromise = null;
+  }
+  if (this._vec2LastEntries){
+    try { this._vec2LastEntries.clear(); } catch(e) { /* noop */ }
+    this._vec2LastEntries = new Map();
   }
   this._layerCache.clear();
   this._dirtyLayers.clear();

@@ -10,7 +10,7 @@ export function saveLogic(){
   lsSet(logicKey(this.uid), payload);
 }
 
-export function saveBlobs(){
+export async function saveBlobs(){
   const sparse=[];
   for (let z=0; z<this.effectiveCellsZ; z++){
     for (let y=0; y<this.state.cellsY; y++){
@@ -35,6 +35,58 @@ export function saveBlobs(){
     envVariables:this.envVariables, data:sparse, ts:Date.now(), uid:this.uid
   });
   updateRegistrySaved(this.uid);
+
+  if (this._vec2ManagerPromise){
+    try {
+      const manager = await this._vec2ManagerPromise;
+      if (manager){
+        const fieldNames = Array.isArray(this.schema?.fieldNames) ? this.schema.fieldNames.slice() : [];
+        const makeKey = (x,y,z) => `${x}|${y}|${z}`;
+        const encodeVec2 = (x,y,z) => [ (z * this.state.cellsX) + x, y ];
+        const nextEntries = new Map();
+        const entries = [];
+
+        if (fieldNames.length){
+          for (const cell of sparse){
+            if (!cell || typeof cell.x !== 'number' || typeof cell.y !== 'number' || typeof cell.z !== 'number') continue;
+            const data = (cell.data && typeof cell.data === 'object') ? cell.data : null;
+            if (!data) continue;
+            const values = fieldNames.map(name => Number(data[name] ?? 0));
+            const hasValue = values.some(v => v !== 0);
+            if (!hasValue) continue;
+            const vec2 = encodeVec2(cell.x, cell.y, cell.z);
+            const tagGroup = `layer-${cell.z}`;
+            entries.push({ vec2, values, tagGroup, tagNames: fieldNames });
+            nextEntries.set(makeKey(cell.x, cell.y, cell.z), { vec2, tagGroup });
+          }
+        }
+
+        const BATCH_SIZE = 4000;
+        for (let i = 0; i < entries.length; i += BATCH_SIZE){
+          const chunk = entries.slice(i, i + BATCH_SIZE);
+          if (chunk.length) await manager.bulkPreserve(chunk);
+        }
+
+        const deletions = [];
+        if (this._vec2LastEntries && this._vec2LastEntries.size){
+          for (const [key, stored] of this._vec2LastEntries.entries()){
+            if (!nextEntries.has(key)){
+              const vec = Array.isArray(stored?.vec2) ? stored.vec2 : stored;
+              deletions.push(manager.deleteValue(vec));
+              const tagGroup = stored?.tagGroup;
+              if (tagGroup){
+                deletions.push(manager.deleteVec2Tags(tagGroup, vec));
+              }
+            }
+          }
+        }
+        if (deletions.length) await Promise.allSettled(deletions);
+        this._vec2LastEntries = nextEntries;
+      }
+    } catch (err) {
+      console.warn('Vec2 bucket sync failed:', err?.message || err);
+    }
+  }
 }
 
 export function loadState(uid){ return lsGet(stateKey(uid)); }
