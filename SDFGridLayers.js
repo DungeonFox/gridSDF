@@ -1,7 +1,7 @@
 import { DENSE_W, DENSE_H, STORE_BASE, STORE_BASEZ, STORE_LAYER, STORE_LMETA, DEFAULT_QUADRANT_COUNT } from './SDFGridConstants.js';
 import { arraysEqual } from './SDFGridUtil.js';
 import { idbGet, idbPut } from './SDFGridStorage.js';
-import { createSparseQuadrants, denseFromQuadrants } from './SDFGridQuadrants.js';
+import { createDenseZeroTemplate, refreshDenseZeroTemplate, cloneDenseTemplate } from './SDFGridQuadrants.js';
 
 function _quadrantLayout(count){
   const cols=Math.ceil(Math.sqrt(count));
@@ -68,13 +68,28 @@ function _markDirty(ctx, z, bx, by){
 
 export async function _ensureZeroTemplate(){
   const count = this.quadrantCount || DEFAULT_QUADRANT_COUNT;
-  if (!this._db) return createSparseQuadrants(count, this.envExpressions || []);
+  const envExprs = this.envExpressions || [];
+  if (!this._db){
+    if (!this._zeroTemplateMemory){
+      this._zeroTemplateMemory = createDenseZeroTemplate(count, envExprs, this.schema);
+    } else {
+      const res = refreshDenseZeroTemplate(this._zeroTemplateMemory, count, envExprs, this.schema);
+      this._zeroTemplateMemory = res.template;
+    }
+    return this._zeroTemplateMemory;
+  }
   const key=`sid:${this.schema.id}`;
   let tmpl=await idbGet(this._db, STORE_BASEZ, key);
+  let needsPersist=false;
   if (!tmpl){
-    tmpl=createSparseQuadrants(count, this.envExpressions || []);
-    await idbPut(this._db, STORE_BASEZ, key, tmpl);
+    tmpl=createDenseZeroTemplate(count, envExprs, this.schema);
+    needsPersist=true;
+  } else {
+    const res=refreshDenseZeroTemplate(tmpl, count, envExprs, this.schema);
+    tmpl=res.template;
+    if (res.replaced || res.mutated) needsPersist=true;
   }
+  if (needsPersist) await idbPut(this._db, STORE_BASEZ, key, tmpl);
   return tmpl;
 }
 
@@ -134,7 +149,7 @@ export async function _ensureDenseLayer(z){
 
   if (buffers.every(b=>!b)){
     const tmpl=await this._ensureZeroTemplate();
-    const arr=denseFromQuadrants(tmpl, targetSchema);
+    const arr=cloneDenseTemplate(tmpl, targetSchema);
     await this._applySparseIntoDense(z, arr);
     await Promise.all(Array.from({length:qCount},(_,i)=>{
       const quad=_sliceQuadrant.call(this, arr, i, Fnew);
