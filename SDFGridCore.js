@@ -46,6 +46,7 @@ import {
 } from './SDFGridState.js';
 import { layerInfo, readCell, centerCell } from './SDFGridConsole.js';
 import { envExpressionFromModule, parseEnvExpression } from './SDFGridEnvExpressions.js';
+import Vec2BucketManager from './vec2BucketManager.js';
 
 export class SDFGrid{
   constructor(uid, scene, params){
@@ -95,6 +96,38 @@ export class SDFGrid{
     this.bucketNameLC = normalizeBucketName(this.uid);
     this._bucket = null;
     this._db     = null;
+
+    this._vec2ManagerPromise = null;
+    this._vec2LastEntries = new Map();
+    if (typeof window !== 'undefined' && (typeof window.indexedDB !== 'undefined' || (typeof navigator !== 'undefined' && navigator.storageBuckets))) {
+      const baseContext = {
+        card: 'sdfgrid',
+        repo: this.uid,
+        file: params?.shapeType || 'grid',
+        group: 'default',
+        forceBucket: this.bucketNameLC
+      };
+      this._vec2ManagerPromise = Vec2BucketManager.create({
+        context: baseContext,
+        resolver: () => this.bucketNameLC,
+        reliability: {
+          enabled: true,
+          onLog: (lvl, ...args) => {
+            if (lvl === 'warn') console.warn('[Vec2Buckets reliability]', ...args);
+          }
+        },
+        onLog: (lvl, ...args) => {
+          if (typeof lvl === 'string' && /warn|error/i.test(lvl)) {
+            console.warn('[Vec2Buckets]', lvl, ...args);
+          }
+        }
+      }).catch(err => {
+        console.warn('Vec2BucketManager init failed:', err);
+        return null;
+      });
+    } else {
+      this._vec2ManagerPromise = Promise.resolve(null);
+    }
 
     // overlay schema
     const initialFields = Array.isArray(params.fieldNames)&&params.fieldNames.length ? params.fieldNames.slice() : this.envVariables.slice();
